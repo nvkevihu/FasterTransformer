@@ -16,7 +16,7 @@ import torch
 import torch.nn as nn
 import torch.distributed as dist
 import numpy as np
-
+from datetime import datetime
 
 class FTT5DecodingWeight(object):
     def __init__(
@@ -343,7 +343,8 @@ class FTT5(nn.Module):
     def forward(self, input_token, inputs_embeds, beam_size, max_seq_len,
                 top_k, top_p, beam_search_diversity_rate,
                 temperature=1.0, len_penalty=0.0, repetition_penalty=1.0, random_seed=0,
-                is_return_output_log_probs=False, is_return_cum_log_probs=False, is_return_cross_attentions=False):
+                is_return_output_log_probs=False, is_return_cum_log_probs=False, is_return_cross_attentions=False,
+                time_segments=False):
         input_ids = input_token.input_ids.to("cuda").type(torch.int32)
         mem_seq_len = 0
         if hasattr(input_token, "attention_mask"):
@@ -351,7 +352,12 @@ class FTT5(nn.Module):
         else:
             mem_seq_len = input_token.seq_len.type(torch.int32).to("cuda")
 
+        start_time = datetime.now()
         ft_encoder_outputs = self.encoder.forward(input_ids, mem_seq_len, inputs_embeds)
+        if time_segments:
+            torch.cuda.synchronize()
+            encoder_time, start_time = datetime.now() - start_time, datetime.now()
+
         results = self.decoding.forward(beam_size,  # optional, can be None
                                         max_seq_len,
                                         top_k,  # optional, can be None
@@ -366,6 +372,10 @@ class FTT5(nn.Module):
                                         is_return_cross_attentions,  # optional, can be None
                                         ft_encoder_outputs,
                                         mem_seq_len)
+        if time_segments:
+            torch.cuda.synchronize()
+            decoder_time = datetime.now() - start_time
+
         ft_decoding_outputs = results.pop(0).reshape([-1, beam_size, max_seq_len])
         ft_decoding_seq_lens = results.pop(0).reshape([-1, beam_size])
         if is_return_output_log_probs:
@@ -376,4 +386,5 @@ class FTT5(nn.Module):
             ft_cross_attentions = results.pop(0)
             return ft_decoding_outputs.cpu().numpy(), ft_decoding_seq_lens.cpu().numpy(), ft_cross_attentions.cpu().numpy()
 
-        return ft_decoding_outputs.cpu().numpy(), ft_decoding_seq_lens.cpu().numpy()
+        segment_times = (encoder_time, decoder_time) if time_segments else None
+        return ft_decoding_outputs.cpu().numpy(), ft_decoding_seq_lens.cpu().numpy(), segment_times

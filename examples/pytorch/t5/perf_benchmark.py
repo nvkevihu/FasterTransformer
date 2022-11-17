@@ -54,6 +54,8 @@ class TranslationResult(object):
         self.batch_seq_len_list = []
         self.batch_num = 0
         self.execution_time = 0.0  # seconds
+        self.encoder_time = 0.0 # seconds
+        self.decoder_time = 0.0 # seconds
         self.token_num = 0
 
 class InputTokens(object):
@@ -92,6 +94,7 @@ def translate(args_dict):
     infer_duration = args_dict['duration']
     seed = args_dict['seed']
     skip_gemm = args_dict['skip_gemm']
+    time_segments = args_dict['time_segments']
     torch.manual_seed(seed)
 
     ## huggingface without bias and use relative position embedding
@@ -299,15 +302,22 @@ def translate(args_dict):
                 tmp_beam_size = beam_size
                 if translation_result_list[i].name.find("sampling") != -1:
                     tmp_beam_size = 1
-                ft_decoding_outputs, ft_decoding_seq_lens = ft_t5(input_token,
-                                                                  None,
-                                                                  tmp_beam_size,
-                                                                  output_seq_len,
-                                                                  topk,
-                                                                  topp,
-                                                                  beam_search_diversity_rate=beam_search_diversity_rate)
+                ft_decoding_outputs, ft_decoding_seq_lens, segment_times = ft_t5(
+                    input_token,
+                    None,
+                    tmp_beam_size,
+                    output_seq_len,
+                    topk,
+                    topp,
+                    beam_search_diversity_rate=beam_search_diversity_rate,
+                    time_segments=time_segments
+                )
                 translation_result_list[i].batch_ids_list.append(ft_decoding_outputs)
                 translation_result_list[i].batch_seq_len_list.append(ft_decoding_seq_lens)
+                if time_segments:
+                    encoder_time, decoder_time = segment_times
+                    translation_result_list[i].encoder_time += encoder_time.total_seconds()
+                    translation_result_list[i].decoder_time += decoder_time.total_seconds()
 
             translation_result_list[i].batch_num += 1
 
@@ -331,7 +341,10 @@ def translate(args_dict):
                 continue
             print(f"[INFO] {t.name} translates {t.batch_num} batches taking {t.execution_time:.2f} sec to translate "
                 f"{t.token_num} tokens ({(t.execution_time / t.batch_num * 1000):.4f} ms per batch), "
-                f"{(t.token_num / t.execution_time):.0f} tokens/sec.")
+                f"{(t.token_num / t.execution_time):.0f} tokens/sec.",
+                (f"Mean encoder latency is {(t.encoder_time / t.batch_num * 1000):.4f} ms per batch, "
+                 f"and mean decoder latency is {(t.decoder_time / t.batch_num * 1000):.4f} ms per batch."
+                 if time_segments else ""))
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -387,6 +400,8 @@ if __name__ == "__main__":
                         help='Random seed used to generate random input values.')
     parser.add_argument('-skip_gemm', '--skip_gemm', action="store_true",
                         help='Skip the gemm autotuning by not calling the ./bin/t5_gemm binary.')
+    parser.add_argument('-time_segments', '--time_segments', action="store_true",
+                        help='Separately time the encoder and decoder segments, in addition to end-to-end duration.')
     args = parser.parse_args()
 
     translate(vars(args))
